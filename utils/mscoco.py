@@ -6,7 +6,7 @@ import torch
 import numpy as np
 
 from tqdm import trange
-from PIL import Image
+from PIL import Image, ImageOps
 from .segbase import SegmentationDataset
 
 
@@ -36,25 +36,34 @@ class COCOSegmentation(SegmentationDataset):
     >>>     trainset, 4, shuffle=True,
     >>>     num_workers=4)
     """
-    CAT_LIST = [0, 5, 2, 16, 9, 44, 6, 3, 17, 62, 21, 67, 18, 19, 4,
-                1, 64, 20, 63, 7, 72]
-    NUM_CLASS = 21
+    CAT_LIST = [0, 1, 2]
+    NUM_CLASS = 3
 
-    def __init__(self, root='../datasets/coco', split='train', mode=None, transform=None, **kwargs):
+    def __init__(self, root='/robodata/smodak/corl_rebuttal/dino_traindata/safety', split='train', mode="train", transform=None, **kwargs):
         super(COCOSegmentation, self).__init__(root, split, mode, transform, **kwargs)
         # lazy import pycocotools
         from pycocotools.coco import COCO
         from pycocotools import mask
-        if split == 'train':
+        if split == 'train30':
+            print('train30 set')
+            ann_file = os.path.join(root, 'train30/mscoco_annotations.json')
+            ids_file = os.path.join(root, 'train30/mscoco_ids.mx')
+            self.root = os.path.join(root, 'train30/images')
+        elif split == 'train':
             print('train set')
-            ann_file = os.path.join(root, 'annotations/instances_train2017.json')
-            ids_file = os.path.join(root, 'annotations/train_ids.mx')
-            self.root = os.path.join(root, 'train2017')
-        else:
+            ann_file = os.path.join(root, 'train/mscoco_annotations.json')
+            ids_file = os.path.join(root, 'train/mscoco_ids.mx')
+            self.root = os.path.join(root, 'train/images')
+        elif split == 'val':
             print('val set')
-            ann_file = os.path.join(root, 'annotations/instances_val2017.json')
-            ids_file = os.path.join(root, 'annotations/val_ids.mx')
-            self.root = os.path.join(root, 'val2017')
+            ann_file = os.path.join(root, 'eval/mscoco_annotations.json')
+            ids_file = os.path.join(root, 'eval/mscoco_ids.mx')
+            self.root = os.path.join(root, 'eval/images')
+        else:
+            print('test set')
+            ann_file = os.path.join(root, 'test/mscoco_annotations.json')
+            ids_file = os.path.join(root, 'test/mscoco_ids.mx')
+            self.root = os.path.join(root, 'test/images')
         self.coco = COCO(ann_file)
         self.coco_mask = mask
         if os.path.exists(ids_file):
@@ -74,6 +83,11 @@ class COCOSegmentation(SegmentationDataset):
         cocotarget = coco.loadAnns(coco.getAnnIds(imgIds=img_id))
         mask = Image.fromarray(self._gen_seg_mask(
             cocotarget, img_metadata['height'], img_metadata['width']))
+        padding = (0, 210, 0, 210)  # left, top, right, bottom
+        img = ImageOps.expand(img, padding, fill=0)
+        mask = ImageOps.expand(mask, padding, fill=0)
+        img = img.resize((540, 540), Image.BILINEAR)
+        mask = mask.resize((540, 540), Image.NEAREST)
         # synchrosized transform
         if self.mode == 'train':
             img, mask = self._sync_transform(img, mask)
@@ -97,7 +111,8 @@ class COCOSegmentation(SegmentationDataset):
         mask = np.zeros((h, w), dtype=np.uint8)
         coco_mask = self.coco_mask
         for instance in target:
-            rle = coco_mask.frPyObjects(instance['segmentation'], h, w)
+            # rle = coco_mask.frPyObjects(instance['segmentation'], h, w)  # use this line if segmentation in polygon format
+            rle = instance['segmentation']
             m = coco_mask.decode(rle)
             cat = instance['category_id']
             if cat in self.CAT_LIST:
@@ -111,7 +126,7 @@ class COCOSegmentation(SegmentationDataset):
         return mask
 
     def _preprocess(self, ids, ids_file):
-        print("Preprocessing mask, this will take a while." + \
+        print("Preprocessing mask, this will take a while." +
               "But don't worry, it only run once for each split.")
         tbar = trange(len(ids))
         new_ids = []
@@ -123,7 +138,7 @@ class COCOSegmentation(SegmentationDataset):
             # more than 1k pixels
             if (mask > 0).sum() > 1000:
                 new_ids.append(img_id)
-            tbar.set_description('Doing: {}/{}, got {} qualified images'. \
+            tbar.set_description('Doing: {}/{}, got {} qualified images'.
                                  format(i, len(ids), len(new_ids)))
         print('Found number of qualified images: ', len(new_ids))
         with open(ids_file, 'wb') as f:
@@ -133,7 +148,4 @@ class COCOSegmentation(SegmentationDataset):
     @property
     def classes(self):
         """Category names."""
-        return ('background', 'airplane', 'bicycle', 'bird', 'boat', 'bottle',
-                'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse',
-                'motorcycle', 'person', 'potted-plant', 'sheep', 'sofa', 'train',
-                'tv')
+        return ('background', 'safe', 'unsafe')

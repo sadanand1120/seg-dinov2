@@ -7,28 +7,33 @@ import timm
 
 
 class DINO2SEG(nn.Module):
-    def __init__(self, num_cls):
+    def __init__(self, num_cls, big=False):
         super(DINO2SEG, self).__init__()
-        self.backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-        self.num_class = num_cls 
+        if big:
+            self.backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
+            NAME_TAG = 'blocks.12.'
+            DIM = 1536
+        else:
+            self.backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+            NAME_TAG = 'blocks.4.'
+            DIM = 768
+        self.num_class = num_cls
         # for param in self.backbone.parameters():
         #     param.requires_grad=True
 
         switch = False
         for name, param in self.backbone.named_parameters():
             if param.requires_grad:
-                if 'blocks.4.' in name:
+                if NAME_TAG in name:
                     switch = True
                 if switch:
-                    param.requires_grad=True
+                    param.requires_grad = True
                 else:
-                    param.requires_grad=False
+                    param.requires_grad = False
 
-
-
-        # token projection 
+        # token projection
         # linear
-        self.l1 = nn.Linear(768, 512)
+        self.l1 = nn.Linear(DIM, 512)
         # self.l3 = nn.Linear(num_cls, num_cls)
         self.relu = nn.ReLU()
         # self.out = nn.Conv2d(512, num_cls, 1)
@@ -37,12 +42,12 @@ class DINO2SEG(nn.Module):
         self.up1 = nn.Upsample(scale_factor=2)
         self.up2 = nn.Upsample(scale_factor=2)
         self.up3 = nn.Upsample((448, 448))
-    
+
     def forward(self, x):
         bs = x.shape[0]
         # x = torch.permute(x, (0, 3, 1, 2))
-        out = self.backbone.forward_features(x.float()) 
-        
+        out = self.backbone.forward_features(x.float())
+
         # out = self.mlp_head(out["x_norm_patchtokens"]) # dinov2
         out = out["x_norm_patchtokens"]
         out = self.l1(out)
@@ -56,12 +61,11 @@ class DINO2SEG(nn.Module):
 
         return out
 
-
     def save(self, path):
         # save mlp_head and not backbone
         torch.save({
             "mlp_head": self.mlp_head.state_dict(),
-            }, path)
+        }, path)
 
     def load(self, weight):
         self.mlp_head.load_state_dict(weight)

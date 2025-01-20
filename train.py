@@ -9,6 +9,7 @@ cur_path = os.path.abspath(os.path.dirname(__file__))
 root_path = os.path.split(cur_path)[0]
 sys.path.append(root_path)
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data as data
@@ -19,33 +20,25 @@ from torchvision import transforms
 from models.dino2 import DINO2SEG
 from utils.mscoco import COCOSegmentation
 from utils.segmentationMetric import *
-from utils.vis import decode_segmap 
+from utils.vis import decode_segmap
 
 from tensorboardX import SummaryWriter
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Semantic Segmentation Training With Pytorch')
-
-    parser.add_argument('--base-size', type=int, default=580,
-                        help='base image size')
-    parser.add_argument('--crop-size', type=int, default=518,
-                        help='crop image size')
-
-    # training hyper params
-    parser.add_argument('--batch-size', type=int, default=8, metavar='N',
-                        help='input batch size for training (default: 8)')
-    parser.add_argument('--epochs', type=int, default=20, metavar='N',
-                        help='number of epochs to train (default: 50)')
-    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR',
-                        help='learning rate (default: 1e-4)')
-
-    # checkpoint and log
-    parser.add_argument('--save-dir', default='./ckpt',
-                        help='Directory for saving checkpoint models')
-
+    parser.add_argument('--batch-size', type=int, default=4, metavar='N', help='input batch size for training (default: 8)')
+    parser.add_argument('--epochs', type=int, default=20, metavar='N', help='number of epochs to train (default: 50)')
+    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR', help='learning rate (default: 1e-4)')
+    parser.add_argument('--save-dir', default='./mymodels/safety/small30', help='Directory for saving checkpoint models')
+    parser.add_argument('--cuda', type=str, default='0', help="Comma-separated list of CUDA devices to use, e.g., '0,1'.")
+    parser.add_argument('--big', action='store_true', help="Flag to enable the big model. Default is False.")
+    parser.add_argument('--split', type=str, default='train')
+    parser.add_argument('--ds', type=str, default='safety')
     args = parser.parse_args()
+    args.save_dir = os.path.join('./mymodels/nscl', args.ds)
     return args
+
 
 class Trainer(object):
     def __init__(self, args):
@@ -58,24 +51,28 @@ class Trainer(object):
             transforms.Normalize([.485, .456, .406], [.229, .224, .225]),
         ])
         # dataset and dataloader
-        trainset = COCOSegmentation('/mnt/2tb/mscoco/', transform=input_transform)
-        valset = COCOSegmentation('/mnt/2tb/mscoco/', 'val', transform=input_transform)
-        
+        trainset = COCOSegmentation(root=f"/robodata/smodak/corl_rebuttal/dino_traindata/nscl/{args.ds}", split=args.split, transform=input_transform, mode="train")
+        valset = COCOSegmentation(root=f"/robodata/smodak/corl_rebuttal/dino_traindata/nscl/{args.ds}", split="val", transform=input_transform, mode="val")
+
         self.train_loader = data.DataLoader(dataset=trainset, batch_size=args.batch_size,
                                             pin_memory=True)
         self.val_loader = data.DataLoader(dataset=valset, batch_size=args.batch_size,
                                           pin_memory=True)
 
-        self.model = nn.DataParallel(DINO2SEG(len(trainset.classes)).to(self.device))
-    
+        self.model = nn.DataParallel(DINO2SEG(len(trainset.classes), big=args.big).to(self.device))
+        # number of params
+        num_params = sum(p.numel() for p in self.model.module.parameters())
+        print(f"Number of Total parameters: {num_params}")
+
         # create criterion
-        a =  1/42
-        b = (1-a)/20
-        weights = torch.tensor([a] + [b for _ in range(20)]).to('cuda')
-        self.criterion = nn.CrossEntropyLoss(weight=weights) 
+        # a = 1 / 42
+        # b = (1 - a) / 20
+        # weights = torch.tensor([a] + [b for _ in range(20)]).to('cuda')
+        # self.criterion = nn.CrossEntropyLoss(weight=weights)
+        self.criterion = nn.CrossEntropyLoss()
 
         self.optimizer = torch.optim.AdamW(self.model.parameters(),
-                                         lr=args.lr)
+                                           lr=args.lr)
 
         self.metric = SegmentationMetric(len(trainset.classes))
         self.best_pred = -1
@@ -97,16 +94,15 @@ class Trainer(object):
                 loss = self.criterion(outputs, targets)
 
                 loss = torch.mean(loss)
-            
+
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 avg_loss += loss
 
-                
-                if iteration % 100 == 0:
+                if iteration % 1 == 0:
                     print(f"e {i} |{iteration} it: {avg_loss.item()/100}")
-                    writer.add_scalar('training loss', avg_loss.item()/100, iteration)
+                    writer.add_scalar('training loss', avg_loss.item() / 100, iteration)
                     avg_loss = 0
 
                 # if iteration % 1000 == 1:
@@ -118,11 +114,10 @@ class Trainer(object):
                 #     writer.add_image("pred", pred, iteration)
                 #     writer.add_image("gt", gt, iteration)
 
-
     def validation(self, it, e):
         # total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
         is_best = False
-        torch.cuda.empty_cache() 
+        torch.cuda.empty_cache()
 
         self.model.eval()
         _preds = []
@@ -139,7 +134,7 @@ class Trainer(object):
 
             pred = torch.max(outputs, 1).indices
             for i in range(pred.shape[0]):
-                if len(_preds)<64:
+                if len(_preds) < 64:
                     _preds.append(torchvision.transforms.ToTensor()(decode_segmap(pred[i].cpu().data.numpy())))
                     _targets.append(torchvision.transforms.ToTensor()(decode_segmap(target[i].cpu().data.numpy())))
 
@@ -157,7 +152,7 @@ class Trainer(object):
             is_best = True
             self.best_pred = new_pred
 
-        save_checkpoint(self.model, self.args, is_best)
+        save_checkpoint(self.model.module, self.args, is_best)
 
 
 def save_checkpoint(model, args, is_best=False):
@@ -177,7 +172,7 @@ def save_checkpoint(model, args, is_best=False):
 
 if __name__ == '__main__':
     args = parse_args()
-    os.environ["CUDA_VISIBLE_DEVICES"] = '0, 1'
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda
 
     # reference maskrcnn-benchmark
     args.device = "cuda"
